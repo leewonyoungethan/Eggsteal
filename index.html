@@ -598,7 +598,7 @@ $('startBtn').onclick = () => { initAudio(); S.lives = 3; S.score = 0; $('menu')
 $('resumeBtn').onclick = () => setPause(false);
 $('quitBtn').onclick = () => { $('pause').classList.remove('show'); submitScore(S.score, S.night); toMenu(); };
 $('rMenu').onclick = () => { $('result').classList.remove('show'); toMenu(); };
-function toMenu() { S.mode = 'menu'; showBest(); $('menu').classList.add('show'); }
+function toMenu() { S.mode = 'menu'; showBest(); $('menu').classList.add('show'); if (LB.supa) supaLoad(); }
 
 // ---------- UI ----------
 let toastT = 0;
@@ -617,7 +617,11 @@ function updateHUD() {
     (chasing ? `<span style="color:var(--bad);font-weight:700">⚠ ${chasing}마리 추격 중!</span>` : `<span style="font-size:12px;color:var(--muted)">총점 ${S.score}</span>`);
 }
 
-// ---------- 순위표 (claude.ai 공유 저장소) ----------
+// ---------- 순위표 ----------
+// GitHub Pages 등 일반 웹: Supabase 무료 DB에 저장 (아래 두 값을 채우면 켜짐. anon 키는 공개용 키라 넣어도 됩니다)
+// claude.ai 아티팩트: claude.ai 공유 저장소 사용
+const SUPABASE_URL = '';       // 예: 'https://abcdxyz.supabase.co'
+const SUPABASE_ANON_KEY = '';  // Project Settings → API → anon public 키
 const LB = { db: null, uid: null, canWrite: false, rows: [], mine: null, loaded: false, note: '순위 불러오는 중…' };
 const nickEl = $('nick');
 (function initNick() {
@@ -630,6 +634,7 @@ function getNick() { return (nickEl.value || '').trim().slice(0, 12) || '이름�
 nickEl.addEventListener('keydown', (e) => e.stopPropagation());
 nickEl.addEventListener('change', async () => {
   try { localStorage.setItem('eggsteal-nick', getNick()); } catch (e) {}
+  if (LB.supa) { LB.uid = 'n:' + getNick(); renderBoard(); }
   if (LB.db && LB.uid && LB.canWrite && LB.mine && LB.mine.nick !== getNick()) {
     try { await LB.db.doc('scores/' + LB.uid).update({ nick: getNick() }); } catch (e) {}
   }
@@ -657,7 +662,11 @@ function cleanRow(id, d) {
 }
 async function initBoard() {
   const cl = window.claude;
-  if (!cl || typeof cl.use !== 'function') { LB.note = '순위표는 claude.ai에서 열었을 때 사용할 수 있어요'; renderBoard(); return; }
+  if (!cl || typeof cl.use !== 'function') {
+    if (SUPABASE_URL && SUPABASE_ANON_KEY) { LB.supa = true; await supaLoad(); setInterval(() => { if (S.mode !== 'play') supaLoad(); }, 30000); }
+    else { LB.note = '순위표가 아직 연결되지 않았어요'; renderBoard(); }
+    return;
+  }
   const [db, user] = await Promise.all([cl.use('db'), cl.use('user')]);
   if (!db) { LB.note = '로그인하면 순위표를 볼 수 있어요'; renderBoard(); return; }
   LB.db = db;
@@ -674,7 +683,43 @@ async function initBoard() {
   if (LB.uid) db.doc('scores/' + LB.uid).onSnapshot((s) => { LB.mine = s.exists ? cleanRow(s.id, s.data()) : null; renderBoard(); }, () => {});
   renderBoard();
 }
+// --- Supabase (REST) ---
+function supaHeaders(extra) {
+  return Object.assign({ apikey: SUPABASE_ANON_KEY, Authorization: 'Bearer ' + SUPABASE_ANON_KEY }, extra || {});
+}
+async function supaLoad() {
+  try {
+    const r = await fetch(SUPABASE_URL + '/rest/v1/scores?select=nick,score,night&order=score.desc&limit=100', { headers: supaHeaders() });
+    if (!r.ok) throw new Error(r.status);
+    const rows = await r.json();
+    const best = new Map();   // 같은 닉네임은 최고 기록 하나만
+    for (const d of rows) { const row = cleanRow('', d); row.id = 'n:' + row.nick; if (!best.has(row.nick)) best.set(row.nick, row); }
+    LB.rows = [...best.values()].slice(0, 10);
+    LB.uid = 'n:' + getNick();
+    LB.note = '';
+  } catch (e) {
+    LB.note = LB.rows.length ? '순위가 최신이 아닐 수 있어요' : '순위를 불러오지 못했어요';
+  }
+  renderBoard();
+}
+async function supaSubmit(score, night) {
+  let prev = 0;
+  try { prev = +localStorage.getItem('eggsteal-sent-best') || 0; } catch (e) {}
+  try {
+    const r = await fetch(SUPABASE_URL + '/rest/v1/scores', {
+      method: 'POST', headers: supaHeaders({ 'Content-Type': 'application/json', Prefer: 'return=minimal' }),
+      body: JSON.stringify({ nick: getNick(), score: Math.floor(score), night: Math.floor(night) }),
+    });
+    if (!r.ok) throw new Error(r.status);
+    try { if (score > prev) localStorage.setItem('eggsteal-sent-best', score); } catch (e) {}
+    await supaLoad();
+    const i = LB.rows.findIndex((x) => x.nick === getNick() && x.score === score);
+    return i >= 0 ? `🏆 순위 ${i + 1}위에 올랐어요!` : '🏆 순위표에 기록됐어요!';
+  } catch (e) { return '순위표에 저장하지 못했어요.'; }
+}
+
 async function submitScore(score, night) {
+  if (LB.supa) return score > 0 ? supaSubmit(score, night) : '';
   if (!LB.db || !LB.uid || !LB.canWrite || score <= 0) return '';
   const prev = LB.mine ? LB.mine.score : 0;
   if (score <= prev) return `내 최고 기록은 ${prev}점이에요.`;
